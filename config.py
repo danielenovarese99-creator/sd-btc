@@ -32,6 +32,11 @@ Z_LEN = _i("Z_LEN", 20)            # lunghezza di SMA e deviazione standard dell
 TP_Z = _f("TP_Z", 2.0)             # soglia dello z-score per il take profit parziale
 TP_FRACTION = _f("TP_FRACTION", 0.5)   # quota della posizione chiusa al take profit (0 = TP disattivato, 1 = chiude tutto)
 
+# Filtro di regime: long solo se close > EMA(REGIME_EMA), short solo se close < EMA(REGIME_EMA). 0 = disattivato
+REGIME_EMA = _i("REGIME_EMA", 0)
+# true = chiudi anche la posizione aperta quando il prezzo rompe la EMA di regime (oltre all'incrocio opposto)
+REGIME_EXIT = os.environ.get("REGIME_EXIT", "false").lower() == "true"
+
 COIN = "BTC"
 CANDLE_INTERVAL = "1h"
 WARMUP_BARS = 100                  # barre iniziali ignorate: le EMA devono convergere
