@@ -34,16 +34,19 @@ def simulate(sig, st, fee, slip, capital, compound):
 
 
 def trades_table(sig, st):
-    rows, cur = [], None
-    close = sig["close"].to_numpy()
+    rows, cur, prev = [], None, 0
+    close, pos = sig["close"].to_numpy(), st["pos"].to_numpy()
     for i in range(len(sig)):
-        if st["flip"].iat[i]:
+        if pos[i] != prev:
             if cur:
                 cur["exit_i"], cur["exit_px"] = i, close[i]
                 rows.append(cur)
-            cur = {"dir": int(st["pos"].iat[i]), "entry_i": i, "entry_px": close[i], "tp_i": None, "tp_px": None}
+                cur = None
+            if pos[i] != 0:
+                cur = {"dir": int(pos[i]), "entry_i": i, "entry_px": close[i], "tp_i": None, "tp_px": None}
         elif st["tp_event"].iat[i] and cur:
             cur["tp_i"], cur["tp_px"] = i, close[i]
+        prev = pos[i]
     if cur:
         cur["exit_i"], cur["exit_px"] = None, None
         rows.append(cur)
@@ -59,6 +62,28 @@ def stats(eq, r):
     return tot, cagr, dd, sh
 
 
+def regime_sweep(df, a):
+    lens = [0, 50, 100, 200, 400, 800]
+    start = df["time"].iloc[max(lens) + cfg.WARMUP_BARS]          # stesso periodo per tutte le righe
+    print(f"Sweep filtro di regime | EMA {a.ema_fast}/{a.ema_slow} | periodo comune da {start:%Y-%m-%d} a "
+          f"{df['time'].iloc[-1]:%Y-%m-%d} | fee {a.fee:.3%} + slip {a.slippage:.3%} per lato")
+    print(f"\n{'regime':>7} {'exit':>5} {'TP':>5} {'Rend.tot':>9} {'MaxDD':>8} {'Sharpe':>7} {'Trade':>6} {'Turnover':>9} {'%tempo in pos':>14}")
+    for L in lens:
+        sig = strat.compute_signals(df, a.ema_fast, a.ema_slow, a.z_len, L)
+        for rexit in ([False] if L == 0 else [False, True]):
+            for frac in [0.0, a.tp_fraction]:
+                st = strat.run_state_machine(sig, a.tp_z, frac, start, rexit)
+                eq, r, dl = simulate(sig, st, a.fee, a.slippage, a.capital, a.compound)
+                m = (sig["time"] >= start).to_numpy()
+                eq, r = eq[m], pd.Series(r[m])
+                tot, cagr, dd, sh = stats(eq, r)
+                ntr = len([1 for t in trades_table(sig[m].reset_index(drop=True), st[m].reset_index(drop=True))])
+                inpos = (st["pos"][m] != 0).mean()
+                print(f"{('off' if L == 0 else L):>7} {('si' if rexit else 'no'):>5} {frac:>5.0%} {tot:>9.1%} {dd:>8.1%} "
+                      f"{sh:>7.2f} {ntr:>6} {dl[m].sum():>9.1f} {inpos:>14.0%}")
+    print("\nexit = esce anche quando il prezzo rompe la EMA di regime. Le righe con TP 0% sono il segnale 'puro'.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv")
@@ -72,6 +97,10 @@ def main():
     ap.add_argument("--tp-z", type=float, default=cfg.TP_Z)
     ap.add_argument("--tp-fraction", type=float, default=cfg.TP_FRACTION)
     ap.add_argument("--from", dest="start")
+    ap.add_argument("--regime-ema", type=int, default=cfg.REGIME_EMA, help="filtro di regime: EMA su close (0 = off)")
+    ap.add_argument("--regime-exit", action="store_true", default=cfg.REGIME_EXIT,
+                    help="esci anche quando il prezzo rompe la EMA di regime")
+    ap.add_argument("--regime-sweep", action="store_true", help="confronta varie lunghezze della EMA di regime")
     ap.add_argument("--compare", action="store_true")
     ap.add_argument("--out", default=".")
     a = ap.parse_args()
@@ -79,14 +108,16 @@ def main():
         raise SystemExit("--ema-fast deve essere < --ema-slow")
 
     df = data_mod.load_csv(a.csv) if a.csv else data_mod.fetch_hyperliquid()
-    sig = strat.compute_signals(df, a.ema_fast, a.ema_slow, a.z_len)
+    if a.regime_sweep:
+        return regime_sweep(df, a)
+    sig = strat.compute_signals(df, a.ema_fast, a.ema_slow, a.z_len, a.regime_ema)
     start_ts = pd.Timestamp(a.start, tz="UTC") if a.start else None
     print(f"Dati: {sig['time'].iloc[0]:%Y-%m-%d %H:%M} -> {sig['time'].iloc[-1]:%Y-%m-%d %H:%M} "
-          f"({len(sig)} barre, {len(sig)/24:.0f} giorni) | EMA {a.ema_fast}/{a.ema_slow} | z-len {a.z_len} | "
+          f"({len(sig)} barre, {len(sig)/24:.0f} giorni) | EMA {a.ema_fast}/{a.ema_slow} | z-len {a.z_len} | regime EMA {a.regime_ema or 'off'}{' (+exit)' if a.regime_exit and a.regime_ema else ''} | "
           f"fee {a.fee:.4%} + slip {a.slippage:.4%} per lato | {'compound' if a.compound else 'capitale fisso'}")
 
     def run(frac):
-        st = strat.run_state_machine(sig, a.tp_z, frac, start_ts)
+        st = strat.run_state_machine(sig, a.tp_z, frac, start_ts, a.regime_exit)
         eq, r, dl = simulate(sig, st, a.fee, a.slippage, a.capital, a.compound)
         first = st["pos"].ne(0).idxmax() if st["pos"].ne(0).any() else 0
         return st, eq.iloc[first:], pd.Series(r[first:]), dl
